@@ -7,6 +7,18 @@ RPV_LEVEL_1_in = -129
 RPV_LEVEL_2_in = -51
 RPV_LEVEL_3_in = 13
 RPV_LEVEL_8_in = 54
+RPV_HI_PRESSURE = 1065
+RPS_TSV_TRIP_POS = 100 - 7
+RPS_IRM_TRIP = 120
+RPS_APRM_HI_FLUX_TRIP = 118
+RPS_APRM_SETDOWN_TRIP = 15
+RPS_APRM_FLOW_TRIP_CLAMP = 111
+RPS_MSIV_TRIP = 100 - 12.5
+RPS_SDV_TRIP_GAL = 18
+RPS_HI_DW_TRIP = 1.68
+RPS_TCV_PRESS_TRIP = 1300
+
+
 
 PSIG_TO_PASCAL = 6895
 
@@ -55,15 +67,16 @@ class ADS_Logic:
 
         #Logic:
         
-        if self.ADS_Timer_Status == False:
-            self.ADS_Timer_Start()
 
         if LevelNR_in > RPV_LEVEL_3_in or LevelWR_in > RPV_LEVEL_1_in:
             self.ADS_Timer_Stop()
+            return
+
+        if self.ADS_Timer_Status == False:
+            self.ADS_Timer_Start()
 
         if self.ADS_Timer_Run(delta) == False:
             return
-
 
         if self.Train == "1":
             if RHR_A_PRESS > ADS_RHR_PRESS_PERMISSIVE_PSIG or LPCS_PRESS > ADS_LPCS_PRESS_PERMISSIVE_PSIG:
@@ -118,12 +131,102 @@ class ADS_Logic:
         self.ADS_Timer_Status = False   
         self.ADS_Timer_Sec = 0
 
+
+#RPS Logic not yet implemented. Work in progress
+#See TODOs prior to implementation
+class RPS_Logic:
+
+    RPS_SYS_INIT = False
+    RPS_Trip_Ch = {
+        "A1" : False,
+        "A2" : False,
+        "B1" : False,
+        "B2" : False,
+    }
+
+    def __init__(self,TrainChannel):
+        self.Train = TrainChannel
+        self.ModeSwTimer = 0
+        self.RPS_Trip_In = False
+        pass
+
+    def RPS_RUN(self, delta, LevelNR, APRMFlux, CoreFlow, OPRMTrip, IRMs, RPVPress, DWPress, TSVPos, EHCPress, MSIVPos, ModeSw,ManScram):
+
+        if RPS_Logic.RPS_SYS_INIT:
+            return
+        
+        RpsTripSignal = False
+
+        if LevelNR < RPV_LEVEL_3_in:
+            RpsTripSignal = True 
+
+        if ModeSw == model.ReactorMode.RUN:
+            if APRMFlux > RPS_APRM_HI_FLUX_TRIP or APRMFlux > RPS_APRM_FLOW_TRIP_CLAMP:
+                RpsTripSignal = True
+        else:
+            if APRMFlux > RPS_APRM_SETDOWN_TRIP:
+                RpsTripSignal = True
+            for IRM in IRMs:
+                if IRM["power"] > RPS_IRM_TRIP:
+                    RpsTripSignal = True
+
+        if RPVPress > RPV_HI_PRESSURE:
+            RpsTripSignal = True
+        
+        if DWPress > RPS_HI_DW_TRIP:
+            RpsTripSignal = True
+            #all Loca Signals
+        
+        if TSVPos < RPS_TSV_TRIP_POS:
+            RpsTripSignal = True
+
+        if EHCPress < RPS_TCV_PRESS_TRIP:
+            RpsTripSignal = True
+        
+        if ModeSw == model.ReactorMode.SHUTDOWN:
+            if self.ModeSwTimer < 10:
+                RpsTripSignal = True
+                self.ModeSwTimer += delta
+        else:
+            self.ModeSwTimer = 0
+        
+        #TODO: APRM/IRM/OPRM Inop Trip
+        #TODO: OPRM Trip
+        #TODO: SDV Trip
+
+        if RpsTripSignal == True and self.RPS_Trip_In == False:
+            #init RPS Trip for channel
+            self.RPS_Trip_In = True
+            RPS_Logic.RPS_Trip_Ch[self.Train] = True
+            self.Scram_Check()
+
+
+    def Scram_Check(self):
+        if RPS_Logic.RPS_Trip_Ch["A1"] == True or RPS_Logic.RPS_Trip_Ch["A2"]:
+            if RPS_Logic.RPS_Trip_Ch["B1"] == True or RPS_Logic.RPS_Trip_Ch["B2"] == True:
+                RPS_Logic.RPS_SYS_INIT = True
+                #do other stuff when a scram occurs
+            else:
+                RPS_Logic.RPS_SYS_INIT = False
+
+    def Reset_Logic(self):
+        #find SDV bypass switch position
+        #verify mode switch timer = 0 or > 10
+        #turn this channel RPS_Logic.RPS_Trip_Ch[self.Train] = False
+        #Run Scram_Check
+        pass
+
+
+#global classes
+
 ADS_1 = ADS_Logic("1")
 ADS_2 = ADS_Logic("2")
+RPS_A1 = RPS_Logic("A1")
+RPS_A2 = RPS_Logic("A2")
+RPS_B1 = RPS_Logic("B1")
+RPS_B2 = RPS_Logic("B2")
 
-def run(delta):
-    
-    #check alarms then run logic
+def ESFAS_ALARMS(self):
     if reactor_inventory.rx_level_nr < RPV_LEVEL_3_in :
         model.alarms["ads_low_lvl_confirmed"]["alarm"] = True
     else:
@@ -139,6 +242,8 @@ def run(delta):
     model.alarms["ads_timer_initiated_1"]["alarm"] = bool(ADS_1.ADS_Timer_Status)
     model.alarms["ads_timer_initiated_2"]["alarm"] = bool(ADS_2.ADS_Timer_Status)
 
+def run(delta):
+    ESFAS_ALARMS()
     ADS_1.ADS_Run(reactor_inventory.rx_level_nr, reactor_inventory.rx_level_wr, model.values["rhr_a_press"]\
                 , model.values["rhr_b_press"], model.values["rhr_c_press"], model.values["lpcs_press"],delta)
     ADS_2.ADS_Run(reactor_inventory.rx_level_nr, reactor_inventory.rx_level_wr, model.values["rhr_a_press"]\
